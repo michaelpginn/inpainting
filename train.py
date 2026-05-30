@@ -10,10 +10,11 @@ import wandb
 from data import load_dataset
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", default="google/flan-t5-base", type=str)
+parser.add_argument("--model", default="google/flan-t5-xl", type=str)
 parser.add_argument("--max-steps", default=10_000, type=int)
-parser.add_argument("--log-every", default=20, type=int)
-parser.add_argument("--batch-size", default=128, type=int)
+parser.add_argument("--log-every", default=2, type=int)
+parser.add_argument("--batch-size", default=16, type=int)
+parser.add_argument("--grad-acc-steps", default=8)
 parser.add_argument("--lr", default=0.01, type=float)
 parser.add_argument("--hub-id", default="lecslab/dialog-inpainter-OQ")
 args = parser.parse_args()
@@ -59,6 +60,7 @@ dataloaders = {
 }
 
 cur_step = 0
+cur_optimizer_step = 0
 cur_epoch = 0
 pbar = tqdm(total=args.max_steps, desc="Training")
 
@@ -87,41 +89,49 @@ train_loss = 0
 train_grad_norm = 0
 
 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-    while cur_step < args.max_steps:
+    while cur_optimizer_step < args.max_steps:
         print(f"Beginning epoch {cur_epoch}")
         for batch_idx, batch in enumerate(dataloaders["train"]):
             model.train()
             out = model(**batch)
             out.loss.backward()
-            unclipped_grad_norm = grad_norm(model)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
             # Running average since last log
-            steps_since_last_log = cur_step % args.log_every
+            steps_since_last_log = cur_step % (args.log_every * args.grad_acc_steps)
             train_loss = (
                 steps_since_last_log / (steps_since_last_log + 1) * train_loss
                 + (1 / (steps_since_last_log + 1)) * out.loss.detach().item()
             )
-            train_grad_norm = (
-                steps_since_last_log / (steps_since_last_log + 1) * train_grad_norm
-                + (1 / (steps_since_last_log + 1)) * unclipped_grad_norm
-            )
 
-            if (cur_step + 1) % args.log_every == 0:
-                eval_loss = eval(model)
-                print(f"Train loss={train_loss}\tEval loss={eval_loss}")
-                wandb.log(
-                    {
-                        "train": {"loss": train_loss, "grad_norm": train_grad_norm},
-                        "eval": {"loss": eval_loss},
-                    },
-                    step=cur_step,
+            if (cur_step + 1) % args.grad_acc_steps == 0:
+                unclipped_grad_norm = grad_norm(model)
+                opt_steps_since_last_log = cur_optimizer_step % args.log_every
+                train_grad_norm = (
+                    opt_steps_since_last_log
+                    / (opt_steps_since_last_log + 1)
+                    * train_grad_norm
+                    + (1 / (opt_steps_since_last_log + 1)) * unclipped_grad_norm
                 )
+
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+                if (cur_optimizer_step + 1) % args.log_every == 0:
+                    eval_loss = eval(model)
+                    print(f"Train loss={train_loss}\tEval loss={eval_loss}")
+                    wandb.log(
+                        {
+                            "train": {"loss": train_loss, "grad_norm": train_grad_norm},
+                            "eval": {"loss": eval_loss},
+                            "epoch": cur_epoch,
+                        },
+                        step=cur_optimizer_step,
+                    )
+                pbar.update()
+                cur_optimizer_step += 1
+                if cur_optimizer_step >= args.max_steps:
+                    break
             cur_step += 1
-            pbar.update()
-            if cur_step >= args.max_steps:
-                break
         cur_epoch += 1
 
 model.push_to_hub(args.hub_id)
