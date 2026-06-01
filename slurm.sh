@@ -5,7 +5,7 @@
 #SBATCH --mem=8000M
 #SBATCH --time=3-00:00:00
 #SBATCH --output=logs/%j.log
-#SBATCH --job-name=specdec
+#SBATCH --job-name=inpainting
 #SBATCH --partition=blanca-blast-lecs
 #SBATCH --account=blanca-blast-lecs
 #SBATCH --qos=blanca-blast-lecs

@@ -10,7 +10,7 @@ import wandb
 from data import load_dataset
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", default="google/flan-t5-xl", type=str)
+parser.add_argument("--model", default="google/flan-t5-base", type=str)
 parser.add_argument("--max-steps", default=10_000, type=int)
 parser.add_argument("--log-every", default=2, type=int)
 parser.add_argument("--batch-size", default=16, type=int)
@@ -44,9 +44,11 @@ def collate(batch):
         )
         texts.append(text)
         targets.append(d["turns"][masked_idx]["question"])
-    return tokenizer(
+    inputs = tokenizer(
         texts, text_target=targets, padding=True, truncation=True, return_tensors="pt"
     ).to(device)
+    inputs["labels"][inputs["labels"] == tokenizer.pad_token_id] = -100
+    return inputs
 
 
 dataloaders = {
